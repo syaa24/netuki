@@ -1,0 +1,18 @@
+name: Bersihkan Semua History
+
+on:
+  workflow_dispatch:
+
+jobs:
+  del_runs:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Hapus Semua Riwayat Run
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_minimum_runs: 0
+          keep_minimum_runs: 0
