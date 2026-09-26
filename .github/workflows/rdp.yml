@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: read
-    timeout-minutes: 350 # Batas maksimal GitHub Actions runner adalah 6 jam (360 menit)
+    timeout-minutes: 350
 
     steps:
       - name: Checkout Repository
@@ -55,12 +55,10 @@ jobs:
           mkdir -p "/c/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp"
           cat << 'EOF' > "/c/ProgramData/Microsoft/Windows/Start Menu/Programs/StartUp/auto.bat"
           @echo off
-          :: Memeriksa apakah script sudah berjalan sebagai Administrator
           net session >nul 2>&1
           if %errorLevel% == 0 (
               goto :RunScript
           ) else (
-              :: Jika belum, otomatis me-restart script ini dengan hak Administrator
               powershell -Command "Start-Process -Verb RunAs -FilePath '%0'"
               exit /b
           )
@@ -71,34 +69,20 @@ jobs:
           echo ========================================================
           echo.
 
-          :: Mematikan semua efek visual (Animasi, bayangan, dll)
           reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f
-
-          :: Mematikan efek jendela saat digeser
           reg add "HKCU\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d 0 /f
-
-          :: Mematikan penghalus huruf (Font Smoothing) agar render teks lebih ringan
           reg add "HKCU\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d 0 /f
 
-          :: Mematikan service background yang sering bikin disk usage 100%
           net stop "SysMain" /y
           sc config "SysMain" start=disabled
-
-          echo.
-          echo ========================================================
-          echo MENGINSTAL DAN MENGONFIGURASI FILEZILLA
-          echo ========================================================
-          echo.
 
           echo Mengunduh FileZilla...
           curl -L -o "%TEMP%\FileZilla_Setup.exe" "https://download.filezilla-project.org/client/FileZilla_3.70.6_win64_sponsored2-setup.exe"
 
-          echo Menginstal FileZilla (Silent Mode)...
+          echo Menginstal FileZilla...
           start /wait "" "%TEMP%\FileZilla_Setup.exe" /S
 
-          echo Mengatur konfigurasi XML dan Layout FileZilla...
           mkdir "%APPDATA%\FileZilla" 2>nul
-
           (
           echo ^<?xml version="1.0"?^>
           echo ^<FileZilla3 version="3.70.6" platform="windows"^>
@@ -276,22 +260,12 @@ jobs:
           echo Mengunduh AutoDownloader.exe...
           curl -L -o "%USERPROFILE%\Desktop\AutoDownloader.exe" "https://www.dropbox.com/scl/fi/s4h2cp5he09gz2z3aoo5r/AutoDownloader.exe?rlkey=lntuysb790s6gg7ywgi66lvrx&st=nob074sf&dl=1"
 
-          echo.
-          echo ========================================================
-          echo MEMBUAT SHORTCUT CHROME KHUSUS (INCOGNITO + ADOBE STOCK)
-          echo ========================================================
+          echo MEMBUAT SHORTCUT CHROME...
           set "ADOBE_URL=https://auth.services.adobe.com/en_US/index.html?callback=https%%3A%%2F%%2Fims-na1.adobelogin.com%%2Fims%%2Fadobeid%%2FAdobeStockContributor1%%2FAdobeID%%2Fcode%%3Fredirect_uri%%3Dhttps%%253A%%252F%%252Fcontributor.stock.adobe.com%%252F%%253Fisa0%%253D1%%26code_challenge_method%%3Dplain%%26use_ms_for_expiry%%3Dtrue&client_id=AdobeStockContributor1&scope=AdobeID%%2Copenid%%2Ccreative_cloud%%2Ccreative_sdk%%2Ccc_private%%2Cgnav%%2Csao.stock%%2Cadditional_info.address.mail_to%%2Cadditional_info.roles%%2Cread_organizations%%2Cread_pc.stock%%2Csao.cce_private%%2Cpps.read%%2Csecurity_phone.status.r%%2Cportfolio.sdk.import&relay=681b1aaa-4524-429d-a843-bd82c376f9b6&locale=en_US&flow_type=code&dctx_id=v%%3A2%%2Cs%%2Cad62dff0-679d-11f0-ae3d-0773325bce27&idp_flow_type=login&ab_test=welcome-back&s_p=google%%2Cfacebook&response_type=code&code_challenge_method=plain&redirect_uri=https%%3A%%2F%%2Fcontributor.stock.adobe.com%%2F%%3Fisa0%%3D1&use_ms_for_expiry=true#/"
           set "CHROME_PATH=C:\Program Files\Google\Chrome\Application\chrome.exe"
           set "SHORTCUT_PATH=%USERPROFILE%\Desktop\Adobe Stock.lnk"
 
           powershell -Command "$wshell = New-Object -ComObject WScript.Shell; $shortcut = $wshell.CreateShortcut($env:SHORTCUT_PATH); $shortcut.TargetPath = $env:CHROME_PATH; $clean_url = $env:ADOBE_URL -replace '%%%%', '%%'; $shortcut.Arguments = \"--incognito `\"$clean_url`\"\"; $shortcut.Save()"
-
-          echo.
-          echo ========================================================
-          echo PROSES SELESAI!
-          echo ========================================================
-          echo RDP telah dioptimalkan (restart RDP agar efek maksimal).
-          echo Membuka FileZilla, Chrome, dan AutoDownloader...
 
           explorer.exe "C:\Program Files\FileZilla FTP Client\filezilla.exe"
           explorer.exe "%USERPROFILE%\Desktop\Adobe Stock.lnk"
@@ -311,7 +285,6 @@ jobs:
           $lastFullAddress = ""
           $global:boreProc = $null
 
-          # Tangani event keluar agar proses bore.exe dipaksa berhenti saat workflow di-cancel
           $cleanup = {
               if ($global:boreProc -and !$global:boreProc.HasExited) {
                   Write-Host "Membatalkan & mematikan proses Bore..."
@@ -333,7 +306,6 @@ jobs:
                   $global:boreProc = [System.Diagnostics.Process]::Start($psi)
 
                   while (!$global:boreProc.HasExited) {
-                      # Membaca output secara non-blocking agar sinyal Cancel GitHub bisa diproses langsung
                       if (!$global:boreProc.StandardOutput.EndOfStream) {
                           $line = $global:boreProc.StandardOutput.ReadLine()
                           if ($line -match "(?:listening at|remote forwarding at) (bore\.pub:\d+)") {
@@ -371,7 +343,6 @@ jobs:
               }
           }
           finally {
-              # Dijalankan otomatis saat pembatalan run diminta
               if ($global:boreProc -and !$global:boreProc.HasExited) {
                   Stop-Process -Id $global:boreProc.Id -Force -ErrorAction SilentlyContinue
               }
