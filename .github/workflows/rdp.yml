@@ -344,3 +344,22 @@ jobs:
               }
               Get-Process -Name "bore" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           }
+
+      - name: Teardown & Notifikasi Shutdown ke Google Sheets
+        if: always()
+        env:
+          SCRIPT_URL: ${{ secrets.GOOGLE_SCRIPT_URL }}
+          SCRIPT_SECRET: ${{ secrets.SCRIPT_SECRET }}
+        run: |
+          Write-Host "Membersihkan instance dan mematikan tunnel..."
+          Get-Process -Name "bore" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          
+          if ($env:SCRIPT_URL -and $env:SCRIPT_SECRET) {
+              try {
+                  $url = "$($env:SCRIPT_URL)?action=offline&secret=$($env:SCRIPT_SECRET)"
+                  $res = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 10
+                  Write-Host "Google Spreadsheet berhasil di-reset ke status offline."
+              } catch {
+                  Write-Warning "Gagal menghubungi Spreadsheet saat teardown: $_"
+              }
+          }
