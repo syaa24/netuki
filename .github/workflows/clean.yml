@@ -28,6 +28,7 @@ jobs:
           echo "Ditemukan $TOTAL riwayat. Menghapus 25 run sekaligus bersamaan..."
 
           # Menghapus secara paralel dengan 25 jalur sekaligus (-P 25)
-          echo "$RUNS" | xargs -I {} -P 25 gh api --silent --method DELETE "repos/$REPO/actions/runs/{}"
+          # Menggunakan flag -r agar tidak error jika baris kosong, dan '|| true' agar tidak crash jika salah satu ID sudah terhapus
+          echo "$RUNS" | xargs -r -I {} -P 25 sh -c 'gh api --silent --method DELETE "repos/$REPO/actions/runs/$1" || true' _ {}
 
           echo "Pembersihan selesai! Semua riwayat lama berhasil dilibas total."
