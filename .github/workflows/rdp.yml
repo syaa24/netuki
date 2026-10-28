@@ -19,57 +19,100 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Optimasi Performa & Matikan UAC (Anti-Block)
-        run: |
-          powercfg /change standby-timeout-ac 0
-          powercfg /change monitor-timeout-ac 0
-          powercfg /change hibernate-timeout-ac 0
-          net stop "SysMain" /y
-          sc config "SysMain" start=disabled
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name "EnableLUA" -Value 0
-
-      - name: Download and Extract Bore
-        run: |
-          Invoke-WebRequest -Uri "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-pc-windows-msvc.zip" -OutFile bore.zip
-          Expand-Archive bore.zip -DestinationPath bore
-
-      - name: Enable RDP + Create Admin User
+      - name: Fast Setup RDP, Anti-Lag Optimasi & Background Installer
         env:
           RDP_PASS: ${{ secrets.RDP_PASSWORD }}
         run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          $ProgressPreference = 'SilentlyContinue'
+
+          Write-Host "1. Menjalankan download AutoDownloader & install FileZilla di background (Paralel)..."
+          $downUrl = "https://www.dropbox.com/scl/fi/s4h2cp5he09gz2z3aoo5r/AutoDownloader.exe?rlkey=lntuysb790s6gg7ywgi66lvrx&st=nob074sf&dl=1"
+          
+          # Download AutoDownloader via curl.exe di background (Download ke .tmp lalu rename agar aman)
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c curl.exe -L -s --retry 3 `"$downUrl`" -o `"C:\Users\Public\Desktop\AutoDownloader.tmp`" && move /y `"C:\Users\Public\Desktop\AutoDownloader.tmp`" `"C:\Users\Public\Desktop\AutoDownloader.exe`"" -WindowStyle Hidden
+
+          # Install FileZilla di background agar tidak menahan proses booting Bore
+          Start-Process -FilePath "choco.exe" -ArgumentList "install filezilla -y --no-progress --limit-output" -WindowStyle Hidden
+
+          Write-Host "2. Download & Extract Bore dengan cepat via curl & tar..."
+          New-Item -ItemType Directory -Force -Path "bore" | Out-Null
+          curl.exe -L -s "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-pc-windows-msvc.zip" -o bore.zip
+          tar.exe -xf bore.zip -C bore
+
+          Write-Host "3. Mengaktifkan RDP & Membuat User Admin..."
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           $pass = ConvertTo-SecureString "$env:RDP_PASS" -AsPlainText -Force
-          New-LocalUser "admin" -Password $pass -FullName "admin"
+          New-LocalUser "admin" -Password $pass -FullName "admin" -PasswordNeverExpires -AccountNeverExpires
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "admin"
           Add-LocalGroupMember -Group "Administrators" -Member "admin"
 
-      - name: Optimasi Registry 4K (Grafik Mulus)
-        run: |
+          Write-Host "4. Optimasi Performa, Matikan UAC, Defender & Service Berat (Anti-Lag)..."
+          # Set High Performance Power Plan
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          powercfg /change standby-timeout-ac 0
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+
+          # Matikan UAC (Anti-Block) & Matikan Server Manager saat login
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name "EnableLUA" -Value 0
+          Get-ScheduledTask -TaskName "ServerManager" | Disable-ScheduledTask | Out-Null
+
+          # Matikan Windows Defender Realtime Scan (Penyebab utama CPU 100% di RDP GitHub)
+          Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableScriptScanning $true -DisableBehaviorMonitoring $true -DisableBlockAtFirstSeen $true
+          Add-MpPreference -ExclusionPath "C:\Users\Public\Desktop", "C:\Users\admin"
+
+          # Hentikan service background yang memakan CPU & Disk I/O
+          $heavyServices = @("SysMain", "WSearch", "DiagTrack", "wuauserv", "UsoSvc", "Spooler")
+          foreach ($svc in $heavyServices) {
+              Stop-Service -Name $svc -Force -NoWait
+              Set-Service -Name $svc -StartupType Disabled
+          }
+
+          # Prioritaskan CPU untuk aplikasi Foreground (Win32PrioritySeparation)
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 38 -Type DWord
+
+          Write-Host "5. Optimasi Registry RDP 4K, 60/120FPS & TCP Tunnel Bore..."
           $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-          if (!(Test-Path $tsPath)) { New-Item -Path $tsPath -Force }
+          if (!(Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
+          # Setting asli dipertahankan + tambahan akselerasi H.264/AVC444 & Kompresi Optimal Bore
           Set-ItemProperty -Path $tsPath -Name "fEnableVirtualizedGraphics" -Value 1 -Type DWord
           Set-ItemProperty -Path $tsPath -Name "MinFrameRate" -Value 120 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "fEnableWddmDriver" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "AVC444ModePreferred" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "VGOptimization_CaptureFrameRate" -Value 60 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "MaxCompressionLevel" -Value 2 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "SelectTransport" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "ColorDepth" -Value 4 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "fDisableWallpaper" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "fDisableFontSmoothing" -Value 1 -Type DWord
 
-      - name: Install FileZilla & Tools
-        run: |
-          choco install filezilla -y --no-progress
+          # Unlock Frame Rate DWM RDP (Smooth Cursor & Window Movement)
+          $winStations = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations"
+          Set-ItemProperty -Path $winStations -Name "DWMFRAMEINTERVAL" -Value 15 -Type DWord
+          Set-ItemProperty -Path "$winStations\RDP-Tcp" -Name "KeepAliveEnable" -Value 1 -Type DWord
+          Set-ItemProperty -Path "$winStations\RDP-Tcp" -Name "KeepAliveInterval" -Value 1 -Type DWord
 
-          $downUrl = "https://www.dropbox.com/scl/fi/s4h2cp5he09gz2z3aoo5r/AutoDownloader.exe?rlkey=lntuysb790s6gg7ywgi66lvrx&st=nob074sf&dl=1"
-          Invoke-WebRequest -Uri $downUrl -OutFile "C:\Users\Public\Desktop\AutoDownloader.exe"
+          # Optimasi TCP Stack untuk Bore Tunnel
+          netsh int tcp set global autotuninglevel=normal | Out-Null
+          netsh int tcp set global rss=enabled | Out-Null
+          netsh int tcp set global ecncapability=disabled | Out-Null
+          netsh int tcp set global timestamps=disabled | Out-Null
 
+          Write-Host "6. Membuat Shortcut Adobe Stock & Master XML FileZilla..."
           $adobeUrl = "https://auth.services.adobe.com/en_US/index.html?callback=https%3A%2F%2Fims-na1.adobelogin.com%2Fims%2Fadobeid%2FAdobeStockContributor1%2FAdobeID%2Fcode%3Fredirect_uri%3Dhttps%253A%252F%252Fcontributor.stock.adobe.com%252F%253Fisa0%253D1%26code_challenge_method%3Dplain%26use_ms_for_expiry%3Dtrue&client_id=AdobeStockContributor1&scope=AdobeID%2Copenid%2Ccreative_cloud%2Ccreative_sdk%2Ccc_private%2Cgnav%2Csao.stock%2Cadditional_info.address.mail_to%2Cadditional_info.roles%2Cread_organizations%2Cread_pc.stock%2Csao.cce_private%2Cpps.read%2Csecurity_phone.status.r%2Cportfolio.sdk.import&relay=681b1aaa-4524-429d-a843-bd82c376f9b6&locale=en_US&flow_type=code&dctx_id=v%3A2%2Cs%2Cad62dff0-679d-11f0-ae3d-0773325bce27&idp_flow_type=login&ab_test=welcome-back&s_p=google%2Cfacebook&response_type=code&code_challenge_method=plain&redirect_uri=https%3A%2F%2Fcontributor.stock.adobe.com%2F%3Fisa0%3D1&use_ms_for_expiry=true#/"
           $chromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
           $wshell = New-Object -ComObject WScript.Shell
           $shortcut = $wshell.CreateShortcut("C:\Users\Public\Desktop\Adobe Stock.lnk")
           $shortcut.TargetPath = $chromePath
-          $shortcut.Arguments = "--incognito `"$adobeUrl`""
+          $shortcut.Arguments = "--incognito --no-first-run --no-default-browser-check --disable-background-networking `"$adobeUrl`""
           $shortcut.Save()
 
-      - name: Generate Master XML Config FileZilla (Full Settings Asli)
-        run: |
-          # 1. filezilla.xml lengkap dengan bypass popup Welcome
+          # 1. filezilla.xml lengkap dengan bypass popup Welcome (Asli)
           @'
           <?xml version="1.0"?>
           <FileZilla3 version="3.71.1" platform="windows">
@@ -228,7 +271,7 @@ jobs:
           </FileZilla3>
           '@ | Out-File -FilePath "C:\filezilla.xml" -Encoding utf8
 
-          # 2. layout.xml
+          # 2. layout.xml (Asli)
           @'
           <?xml version="1.0"?>
           <FileZilla3 version="3.71.1" platform="windows">
@@ -242,30 +285,54 @@ jobs:
           </FileZilla3>
           '@ | Out-File -FilePath "C:\layout.xml" -Encoding utf8
 
-      - name: Setup Auto Launcher saat Login RDP
-        run: |
+          Write-Host "7. Menyusun Auto Launcher saat Login RDP..."
           $startupDir = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
-          New-Item -ItemType Directory -Force -Path $startupDir
+          New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
 
-          # Script ini akan menyuntikkan settingan XML & Optimasi HKCU langsung ke user admin saat login
           $batContent = @"
           @echo off
-          timeout /t 2 /nobreak >nul
-
+          :: Optimasi Visual & Responsivitas UI User Admin (Anti-Lag)
           reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f >nul 2>&1
           reg add "HKCU\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d 0 /f >nul 2>&1
           reg add "HKCU\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d 0 /f >nul 2>&1
+          reg add "HKCU\Control Panel\Desktop" /v MenuShowDelay /t REG_SZ /d 0 /f >nul 2>&1
+          reg add "HKCU\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d 0 /f >nul 2>&1
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 0 /f >nul 2>&1
+          reg add "HKCU\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "" /f >nul 2>&1
 
           mkdir "%APPDATA%\FileZilla" >nul 2>&1
           copy /y "C:\filezilla.xml" "%APPDATA%\FileZilla\filezilla.xml" >nul 2>&1
           copy /y "C:\layout.xml" "%APPDATA%\FileZilla\layout.xml" >nul 2>&1
 
-          timeout /t 1 /nobreak >nul
-
-          start "" "C:\Program Files\FileZilla FTP Client\filezilla.exe"
+          :: Buka Chrome Adobe Stock langsung
           start "" "C:\Users\Public\Desktop\Adobe Stock.lnk"
-          start "" "C:\Users\Public\Desktop\AutoDownloader.exe"
 
+          :: Smart Wait & Launch untuk AutoDownloader (antisipasi jika login sangat cepat)
+          set /a dl_wait=0
+          :wait_dl
+          if exist "C:\Users\Public\Desktop\AutoDownloader.exe" (
+              start "" "C:\Users\Public\Desktop\AutoDownloader.exe"
+              goto check_fz
+          )
+          set /a dl_wait+=1
+          if %dl_wait% GEQ 60 goto check_fz
+          timeout /t 1 /nobreak >nul
+          goto wait_dl
+
+          :: Smart Wait & Launch untuk FileZilla (antisipasi jika choco background masih finishing)
+          :check_fz
+          set /a fz_wait=0
+          :wait_fz
+          if exist "C:\Program Files\FileZilla FTP Client\filezilla.exe" (
+              start "" "C:\Program Files\FileZilla FTP Client\filezilla.exe"
+              goto done_launch
+          )
+          set /a fz_wait+=1
+          if %fz_wait% GEQ 90 goto done_launch
+          timeout /t 1 /nobreak >nul
+          goto wait_fz
+
+          :done_launch
           del "%~f0"
           exit
           "@
@@ -277,6 +344,7 @@ jobs:
           SCRIPT_URL: ${{ secrets.GOOGLE_SCRIPT_URL }}
           SCRIPT_SECRET: ${{ secrets.SCRIPT_SECRET }}
         run: |
+          $ProgressPreference = 'SilentlyContinue'
           $USER = "admin"
           $lastFullAddress = ""
           $global:boreProc = $null
@@ -330,12 +398,12 @@ jobs:
                               }
                           }
                       } else {
-                          Start-Sleep -Milliseconds 400
+                          Start-Sleep -Milliseconds 250
                       }
                   }
 
-                  Write-Host "Peringatan: Koneksi Bore terputus. Menghubungkan ulang dalam 5 detik..."
-                  Start-Sleep -Seconds 5
+                  Write-Host "Peringatan: Koneksi Bore terputus. Menghubungkan ulang dalam 3 detik..."
+                  Start-Sleep -Seconds 3
               }
           }
           finally {
@@ -351,6 +419,7 @@ jobs:
           SCRIPT_URL: ${{ secrets.GOOGLE_SCRIPT_URL }}
           SCRIPT_SECRET: ${{ secrets.SCRIPT_SECRET }}
         run: |
+          $ProgressPreference = 'SilentlyContinue'
           Write-Host "Membersihkan instance dan mematikan tunnel..."
           Get-Process -Name "bore" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           
