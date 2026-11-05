@@ -32,13 +32,13 @@ jobs:
           Write-Host "1. Menjalankan download AutoDownloader & install FileZilla di background (Paralel)..."
           $downUrl = "https://www.dropbox.com/scl/fi/s4h2cp5he09gz2z3aoo5r/AutoDownloader.exe?rlkey=lntuysb790s6gg7ywgi66lvrx&st=nob074sf&dl=1"
           
-          # Download AutoDownloader via curl.exe di background (Download ke .tmp lalu rename agar aman)
+          # Download AutoDownloader via curl.exe di background
           Start-Process -FilePath "cmd.exe" -ArgumentList "/c curl.exe -L -s --retry 3 `"$downUrl`" -o `"C:\Users\Public\Desktop\AutoDownloader.tmp`" && move /y `"C:\Users\Public\Desktop\AutoDownloader.tmp`" `"C:\Users\Public\Desktop\AutoDownloader.exe`"" -WindowStyle Hidden
 
-          # Install FileZilla di background agar tidak menahan proses booting Bore
+          # Install FileZilla di background
           Start-Process -FilePath "choco.exe" -ArgumentList "install filezilla -y --no-progress --limit-output" -WindowStyle Hidden
 
-          Write-Host "2. Download & Extract Bore dengan cepat via curl & tar..."
+          Write-Host "2. Download & Extract Bore..."
           New-Item -ItemType Directory -Force -Path "bore" | Out-Null
           curl.exe -L -s "https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-x86_64-pc-windows-msvc.zip" -o bore.zip
           tar.exe -xf bore.zip -C bore
@@ -51,51 +51,57 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "admin"
           Add-LocalGroupMember -Group "Administrators" -Member "admin"
 
-          Write-Host "4. Optimasi Performa, Matikan UAC, Defender & Service Berat (Anti-Lag)..."
+          Write-Host "4. Optimasi Ekstrem: Matikan Defender, UAC & Service Berat..."
           # Set High Performance Power Plan
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
           powercfg /change standby-timeout-ac 0
           powercfg /change monitor-timeout-ac 0
           powercfg /change hibernate-timeout-ac 0
 
-          # Matikan UAC (Anti-Block) & Matikan Server Manager saat login
+          # Matikan UAC & Server Manager
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name "EnableLUA" -Value 0
           Get-ScheduledTask -TaskName "ServerManager" | Disable-ScheduledTask | Out-Null
 
-          # Matikan Windows Defender Realtime Scan (Penyebab utama CPU 100% di RDP GitHub)
+          # Matikan Windows Defender Total (Biar CPU tidak 100%)
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableScriptScanning $true -DisableBehaviorMonitoring $true -DisableBlockAtFirstSeen $true
-          Add-MpPreference -ExclusionPath "C:\Users\Public\Desktop", "C:\Users\admin"
+          Add-MpPreference -ExclusionPath "C:\"
 
-          # Hentikan service background yang memakan CPU & Disk I/O
-          $heavyServices = @("SysMain", "WSearch", "DiagTrack", "wuauserv", "UsoSvc", "Spooler")
+          # Hentikan semua service background berat yang tidak dipakai
+          $heavyServices = @("SysMain", "WSearch", "DiagTrack", "wuauserv", "UsoSvc", "Spooler", "DPS", "WdiServiceHost", "WdiSystemHost", "WerSvc", "PcaSvc")
           foreach ($svc in $heavyServices) {
               Stop-Service -Name $svc -Force -NoWait
               Set-Service -Name $svc -StartupType Disabled
           }
 
-          # Prioritaskan CPU untuk aplikasi Foreground (Win32PrioritySeparation)
+          # Maksimalkan alokasi CPU untuk aplikasi yang sedang dibuka
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name "Win32PrioritySeparation" -Value 38 -Type DWord
 
-          Write-Host "5. Optimasi Registry RDP 4K, 60/120FPS & TCP Tunnel Bore..."
+          Write-Host "5. Memaksa Aturan Low-Speed, Anti-Lag & Persistent Cache Otomatis..."
           $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           if (!(Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
-          # Setting asli dipertahankan + tambahan akselerasi H.264/AVC444 & Kompresi Optimal Bore
-          Set-ItemProperty -Path $tsPath -Name "fEnableVirtualizedGraphics" -Value 1 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "MinFrameRate" -Value 120 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "fEnableWddmDriver" -Value 1 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "AVC444ModePreferred" -Value 1 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "VGOptimization_CaptureFrameRate" -Value 60 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "MaxCompressionLevel" -Value 2 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "SelectTransport" -Value 1 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "ColorDepth" -Value 4 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "fDisableWallpaper" -Value 1 -Type DWord
-          Set-ItemProperty -Path $tsPath -Name "fDisableFontSmoothing" -Value 1 -Type DWord
 
-          # Unlock Frame Rate DWM RDP (Smooth Cursor & Window Movement)
+          # === OTOMATISASI SETTING EXPERIENCE DARI SERVER (MEMAKSA CLIENT) ===
+          Set-ItemProperty -Path $tsPath -Name "fDisableThemes" -Value 1 -Type DWord             # Hilangkan Desktop Composition & Theme
+          Set-ItemProperty -Path $tsPath -Name "fDisableWallpaper" -Value 1 -Type DWord          # Matikan Wallpaper
+          Set-ItemProperty -Path $tsPath -Name "fDisableFullWindowDrag" -Value 1 -Type DWord     # Hilangkan Show window contents while dragging
+          Set-ItemProperty -Path $tsPath -Name "fDisableMenuAnims" -Value 1 -Type DWord          # Matikan animasi menu
+          Set-ItemProperty -Path $tsPath -Name "fDisableFontSmoothing" -Value 1 -Type DWord      # Hilangkan Smooth edges of screen fonts
+          Set-ItemProperty -Path $tsPath -Name "ColorDepth" -Value 3 -Type DWord                 # Mode warna 16-bit (Sangat ringan & hemat kuota)
+          Set-ItemProperty -Path $tsPath -Name "MaxCompressionLevel" -Value 2 -Type DWord        # Kompresi maksimal (Cocok untuk koneksi broadband rendah)
+          
+          # Hapus beban rendering GPU virtual palsu (Gunakan CPU secara efisien di 30 FPS stabil)
+          Set-ItemProperty -Path $tsPath -Name "fEnableVirtualizedGraphics" -Value 0 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "fEnableWddmDriver" -Value 0 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "AVC444ModePreferred" -Value 0 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "MinFrameRate" -Value 30 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "VGOptimization_CaptureFrameRate" -Value 30 -Type DWord
+
+          # Aktifkan Persistent Bitmap Cache & KeepAlive di level TCP
           $winStations = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations"
-          Set-ItemProperty -Path $winStations -Name "DWMFRAMEINTERVAL" -Value 15 -Type DWord
+          Set-ItemProperty -Path "$winStations\RDP-Tcp" -Name "BitmapCachePersistenceEnable" -Value 1 -Type DWord
           Set-ItemProperty -Path "$winStations\RDP-Tcp" -Name "KeepAliveEnable" -Value 1 -Type DWord
           Set-ItemProperty -Path "$winStations\RDP-Tcp" -Name "KeepAliveInterval" -Value 1 -Type DWord
+          Set-ItemProperty -Path $winStations -Name "DWMFRAMEINTERVAL" -Value 33 -Type DWord
 
           # Optimasi TCP Stack untuk Bore Tunnel
           netsh int tcp set global autotuninglevel=normal | Out-Null
@@ -112,7 +118,7 @@ jobs:
           $shortcut.Arguments = "--incognito --no-first-run --no-default-browser-check --disable-background-networking `"$adobeUrl`""
           $shortcut.Save()
 
-          # 1. filezilla.xml lengkap dengan bypass popup Welcome (Asli)
+          # FileZilla Master XML
           @'
           <?xml version="1.0"?>
           <FileZilla3 version="3.71.1" platform="windows">
@@ -271,7 +277,7 @@ jobs:
           </FileZilla3>
           '@ | Out-File -FilePath "C:\filezilla.xml" -Encoding utf8
 
-          # 2. layout.xml (Asli)
+          # Layout XML
           @'
           <?xml version="1.0"?>
           <FileZilla3 version="3.71.1" platform="windows">
@@ -291,7 +297,7 @@ jobs:
 
           $batContent = @"
           @echo off
-          :: Optimasi Visual & Responsivitas UI User Admin (Anti-Lag)
+          :: Optimasi UI Level User (Best Performance Mode Otomatis)
           reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f >nul 2>&1
           reg add "HKCU\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d 0 /f >nul 2>&1
           reg add "HKCU\Control Panel\Desktop" /v FontSmoothing /t REG_SZ /d 0 /f >nul 2>&1
@@ -304,10 +310,8 @@ jobs:
           copy /y "C:\filezilla.xml" "%APPDATA%\FileZilla\filezilla.xml" >nul 2>&1
           copy /y "C:\layout.xml" "%APPDATA%\FileZilla\layout.xml" >nul 2>&1
 
-          :: Buka Chrome Adobe Stock langsung
           start "" "C:\Users\Public\Desktop\Adobe Stock.lnk"
 
-          :: Smart Wait & Launch untuk AutoDownloader (antisipasi jika login sangat cepat)
           set /a dl_wait=0
           :wait_dl
           if exist "C:\Users\Public\Desktop\AutoDownloader.exe" (
@@ -319,7 +323,6 @@ jobs:
           timeout /t 1 /nobreak >nul
           goto wait_dl
 
-          :: Smart Wait & Launch untuk FileZilla (antisipasi jika choco background masih finishing)
           :check_fz
           set /a fz_wait=0
           :wait_fz
