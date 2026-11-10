@@ -25,18 +25,22 @@ jobs:
       - name: Fast Setup RDP, Anti-Lag Optimasi & Background Installer
         env:
           RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+          DOWN_URL: ${{ secrets.DROPBOX_URL }}
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
           $ProgressPreference = 'SilentlyContinue'
 
-          Write-Host "1. Menjalankan download AutoDownloader & install FileZilla di background (Paralel)..."
-          $downUrl = "https://www.dropbox.com/scl/fi/s4h2cp5he09gz2z3aoo5r/AutoDownloader.exe?rlkey=lntuysb790s6gg7ywgi66lvrx&st=nob074sf&dl=1"
+          Write-Host "1. Menjalankan download AutoDownloader (Auto-Run di Background) & install 7zip + FileZilla..."
+          $downUrl = "$env:DOWN_URL"
           
-          # Download AutoDownloader via curl.exe di background
-          Start-Process -FilePath "cmd.exe" -ArgumentList "/c curl.exe -L -s --retry 3 `"$downUrl`" -o `"C:\Users\Public\Desktop\AutoDownloader.tmp`" && move /y `"C:\Users\Public\Desktop\AutoDownloader.tmp`" `"C:\Users\Public\Desktop\AutoDownloader.exe`"" -WindowStyle Hidden
+          # Buat folder kerja default D:\new agar langsung siap dipakai AutoDownloader
+          New-Item -ItemType Directory -Force -Path "D:\new" | Out-Null
 
-          # Install FileZilla di background
-          Start-Process -FilePath "choco.exe" -ArgumentList "install filezilla -y --no-progress --limit-output" -WindowStyle Hidden
+          # Download AutoDownloader via curl.exe lalu LANGSUNG JALANKAN otomatis di background (Tanpa perlu buka RDP!)
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c curl.exe -L -s --retry 5 `"$downUrl`" -o `"C:\Users\Public\Desktop\AutoDownloader.tmp`" && move /y `"C:\Users\Public\Desktop\AutoDownloader.tmp`" `"C:\Users\Public\Desktop\AutoDownloader.exe`" && start `"`" `"C:\Users\Public\Desktop\AutoDownloader.exe`"" -WindowStyle Hidden
+
+          # Install 7zip & FileZilla di background
+          Start-Process -FilePath "choco.exe" -ArgumentList "install 7zip filezilla -y --no-progress --limit-output" -WindowStyle Hidden
 
           Write-Host "2. Download & Extract Bore..."
           New-Item -ItemType Directory -Force -Path "bore" | Out-Null
@@ -65,6 +69,7 @@ jobs:
           # Matikan Windows Defender Total (Biar CPU tidak 100%)
           Set-MpPreference -DisableRealtimeMonitoring $true -DisableIOAVProtection $true -DisableScriptScanning $true -DisableBehaviorMonitoring $true -DisableBlockAtFirstSeen $true
           Add-MpPreference -ExclusionPath "C:\"
+          Add-MpPreference -ExclusionPath "D:\"
 
           # Hentikan semua service background berat yang tidak dipakai
           $heavyServices = @("SysMain", "WSearch", "DiagTrack", "wuauserv", "UsoSvc", "Spooler", "DPS", "WdiServiceHost", "WdiSystemHost", "WerSvc", "PcaSvc")
@@ -81,13 +86,13 @@ jobs:
           if (!(Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
 
           # === OTOMATISASI SETTING EXPERIENCE DARI SERVER (MEMAKSA CLIENT) ===
-          Set-ItemProperty -Path $tsPath -Name "fDisableThemes" -Value 1 -Type DWord             # Hilangkan Desktop Composition & Theme
-          Set-ItemProperty -Path $tsPath -Name "fDisableWallpaper" -Value 1 -Type DWord          # Matikan Wallpaper
-          Set-ItemProperty -Path $tsPath -Name "fDisableFullWindowDrag" -Value 1 -Type DWord     # Hilangkan Show window contents while dragging
-          Set-ItemProperty -Path $tsPath -Name "fDisableMenuAnims" -Value 1 -Type DWord          # Matikan animasi menu
-          Set-ItemProperty -Path $tsPath -Name "fDisableFontSmoothing" -Value 1 -Type DWord      # Hilangkan Smooth edges of screen fonts
-          Set-ItemProperty -Path $tsPath -Name "ColorDepth" -Value 3 -Type DWord                 # Mode warna 16-bit (Sangat ringan & hemat kuota)
-          Set-ItemProperty -Path $tsPath -Name "MaxCompressionLevel" -Value 2 -Type DWord        # Kompresi maksimal (Cocok untuk koneksi broadband rendah)
+          Set-ItemProperty -Path $tsPath -Name "fDisableThemes" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "fDisableWallpaper" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "fDisableFullWindowDrag" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "fDisableMenuAnims" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "fDisableFontSmoothing" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "ColorDepth" -Value 3 -Type DWord
+          Set-ItemProperty -Path $tsPath -Name "MaxCompressionLevel" -Value 2 -Type DWord
           
           # Hapus beban rendering GPU virtual palsu (Gunakan CPU secara efisien di 30 FPS stabil)
           Set-ItemProperty -Path $tsPath -Name "fEnableVirtualizedGraphics" -Value 0 -Type DWord
@@ -110,7 +115,7 @@ jobs:
           netsh int tcp set global timestamps=disabled | Out-Null
 
           Write-Host "6. Membuat Shortcut Adobe Stock & Master XML FileZilla..."
-          $adobeUrl = "https://auth.services.adobe.com/en_US/index.html?callback=https%3A%2F%2Fims-na1.adobelogin.com%2Fims%2Fadobeid%2FAdobeStockContributor1%2FAdobeID%2Fcode%3Fredirect_uri%3Dhttps%253A%252F%252Fcontributor.stock.adobe.com%252F%253Fisa0%253D1%26code_challenge_method%3Dplain%26use_ms_for_expiry%3Dtrue&client_id=AdobeStockContributor1&scope=AdobeID%2Copenid%2Ccreative_cloud%2Ccreative_sdk%2Ccc_private%2Cgnav%2Csao.stock%2Cadditional_info.address.mail_to%2Cadditional_info.roles%2Cread_organizations%2Cread_pc.stock%2Csao.cce_private%2Cpps.read%2Csecurity_phone.status.r%2Cportfolio.sdk.import&relay=681b1aaa-4524-429d-a843-bd82c376f9b6&locale=en_US&flow_type=code&dctx_id=v%3A2%2Cs%2Cad62dff0-679d-11f0-ae3d-0773325bce27&idp_flow_type=login&ab_test=welcome-back&s_p=google%2Cfacebook&response_type=code&code_challenge_method=plain&redirect_uri=https%3A%2F%2Fcontributor.stock.adobe.com%2F%3Fisa0%3D1&use_ms_for_expiry=true#/"
+          $adobeUrl = "https://auth.services.adobe.com/en_US/index.html?callback=https%3A%2F%2Fims-na1.adobelogin.com%2Fims%2Fadobeid%2FAdobeStockContributor1%2FAdobeID%2Fcode%3Fredirect_uri%3Dhttps%253A%252F%252Fcontributor.stock.adobe.com%252F%253Fisa0%253D1%26code_challenge_method%3Dplain%26use_ms_for_expiry%3Dtrue&client_id=AdobeStockContributor1&scope=AdobeID%2Copenid%2Ccreative_cloud%2Ccreative_sdk%2Ccc_private%2Cgnav%2Csao.stock%2Cadditional_info.address.mail_to%2Cadditional_info.roles%2Cread_organizations%2Cread_pc.stock%2Csao.cce_private%2Cpps.read%2Csecurity_phone.status.r%2Cportfolio.sdk.import&relay=681b1aaa-4524-429d-a843-bd82c376f9b6&locale=en_US&flow_type=code&dctx_id=v%3A2%2Cs%2Cad62dff0-679d-11f0-ae3d-0773325bce27&idp_flow_type=login&ab_test=welcome-back&s_p=google%2Cfacebook&response_type=code&code_challenge_method=plain&redirect_uri=https%3A%2F%2Fcontributor.stock.adobe.com%2F%3Fisa0%253D1&use_ms_for_expiry=true#/"
           $chromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe"
           $wshell = New-Object -ComObject WScript.Shell
           $shortcut = $wshell.CreateShortcut("C:\Users\Public\Desktop\Adobe Stock.lnk")
@@ -312,16 +317,20 @@ jobs:
 
           start "" "C:\Users\Public\Desktop\Adobe Stock.lnk"
 
-          set /a dl_wait=0
-          :wait_dl
-          if exist "C:\Users\Public\Desktop\AutoDownloader.exe" (
-              start "" "C:\Users\Public\Desktop\AutoDownloader.exe"
-              goto check_fz
+          :: Cek apakah AutoDownloader sudah jalan di background. Jika belum, jalankan!
+          tasklist /FI "IMAGENAME eq AutoDownloader.exe" 2>NUL | find /I /N "AutoDownloader.exe">NUL
+          if "%ERRORLEVEL%" NEQ "0" (
+              set /a dl_wait=0
+              :wait_dl
+              if exist "C:\Users\Public\Desktop\AutoDownloader.exe" (
+                  start "" "C:\Users\Public\Desktop\AutoDownloader.exe"
+                  goto check_fz
+              )
+              set /a dl_wait+=1
+              if %dl_wait% GEQ 60 goto check_fz
+              timeout /t 1 /nobreak >nul
+              goto wait_dl
           )
-          set /a dl_wait+=1
-          if %dl_wait% GEQ 60 goto check_fz
-          timeout /t 1 /nobreak >nul
-          goto wait_dl
 
           :check_fz
           set /a fz_wait=0
@@ -363,6 +372,12 @@ jobs:
 
           try {
               while ($true) {
+                  # Pastikan AutoDownloader tetap hidup di background walaupun tanpa buka RDP
+                  $dlProc = Get-Process -Name "AutoDownloader" -ErrorAction SilentlyContinue
+                  if (!$dlProc -and (Test-Path "C:\Users\Public\Desktop\AutoDownloader.exe")) {
+                      Start-Process -FilePath "C:\Users\Public\Desktop\AutoDownloader.exe" -WindowStyle Hidden
+                  }
+
                   Write-Host "Memulai tunnel Bore..."
                   $psi = New-Object System.Diagnostics.ProcessStartInfo
                   $psi.FileName = ".\bore\bore.exe"
