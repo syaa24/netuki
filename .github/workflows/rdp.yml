@@ -57,7 +57,11 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
 
           $pass = ConvertTo-SecureString "$env:RDP_PASS" -AsPlainText -Force
-          New-LocalUser "admin" -Password $pass -FullName "admin" -PasswordNeverExpires -AccountNeverExpires -ErrorAction SilentlyContinue
+          if (Get-LocalUser -Name "admin" -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name "admin" -Password $pass -PasswordNeverExpires $true -AccountNeverExpires -ErrorAction SilentlyContinue
+          } else {
+              New-LocalUser "admin" -Password $pass -FullName "admin" -PasswordNeverExpires -AccountNeverExpires -ErrorAction SilentlyContinue
+          }
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "admin" -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member "admin" -ErrorAction SilentlyContinue
 
@@ -360,74 +364,221 @@ jobs:
           </FileZilla3>
           '@ | Out-File -FilePath "C:\layout.xml" -Encoding utf8
 
-          Write-Host "8. Menyusun Mekanisme Pemulihan rdpclip.exe (Session-Aware) & Auto Launcher..."
-          # Script PowerShell khusus untuk merestart & mengoptimalkan rdpclip.exe di dalam sesi interaktif user RDP
+          Write-Host "8. Menyusun Mekanisme Pemulihan rdpclip.exe (Zero-Flash, Session-Aware) & Silent Auto Launcher..."
+          $rdpInitDir = "C:\ProgramData\RDPInit"
+          $rdpLogDir = "$rdpInitDir\logs"
+          New-Item -ItemType Directory -Force -Path $rdpLogDir | Out-Null
+          # Pastikan proses user interaktif (termasuk medium-integrity token) dapat menulis log diagnostik
+          icacls "$rdpLogDir" /grant "Users:(OI)(CI)M" /Q | Out-Null
+
+          # Script PowerShell pemulihan rdpclip.exe khusus sesi interaktif user RDP dengan logging aman
           $rdpClipFixScript = @'
-          $ErrorActionPreference = 'SilentlyContinue'
-          Get-Process -Name "rdpclip" | Stop-Process -Force
-          Start-Sleep -Milliseconds 300
-          $proc = Start-Process -FilePath "C:\Windows\System32\rdpclip.exe" -PassThru
-          Start-Sleep -Milliseconds 300
-          Get-Process -Name "rdpclip" | ForEach-Object { $_.PriorityClass = 'AboveNormal' }
+          $ErrorActionPreference = 'Stop'
+          $logDir = "C:\ProgramData\RDPInit\logs"
+          if (!(Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+          $logFile = Join-Path $logDir "rdpclip.log"
+
+          function Write-RdpClipLog {
+              param([string]$Message)
+              $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+              Add-Content -Path $logFile -Value "[$ts] [Reset-RdpClip] $Message" -Encoding UTF8 -ErrorAction SilentlyContinue
+          }
+
+          try {
+              if ((Test-Path $logFile) -and ((Get-Item $logFile -ErrorAction SilentlyContinue).Length -gt 1MB)) {
+                  Move-Item -Path $logFile -Destination "$logFile.old" -Force -ErrorAction SilentlyContinue
+              }
+
+              $sessionId = (Get-Process -Id $PID).SessionId
+              Write-RdpClipLog "Memulai pemulihan rdpclip.exe pada Session $sessionId..."
+
+              $targets = Get-Process -Name "rdpclip" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sessionId }
+              if ($targets) {
+                  foreach ($t in $targets) {
+                      Write-RdpClipLog "Menghentikan rdpclip.exe lama (PID=$($t.Id), WS=$([math]::Round($t.WorkingSet64/1MB,1))MB, Handles=$($t.HandleCount))"
+                      Stop-Process -Id $t.Id -Force -ErrorAction SilentlyContinue
+                  }
+                  Start-Sleep -Milliseconds 350
+              }
+
+              $existing = Get-Process -Name "rdpclip" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sessionId }
+              if (-not $existing) {
+                  Start-Process -FilePath "C:\Windows\System32\rdpclip.exe" -WindowStyle Normal
+                  Start-Sleep -Milliseconds 350
+              }
+
+              $active = Get-Process -Name "rdpclip" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sessionId }
+              foreach ($p in $active) {
+                  try {
+                      $p.PriorityClass = 'AboveNormal'
+                      Write-RdpClipLog "rdpclip.exe aktif kembali (Session=$sessionId, PID=$($p.Id), Priority=$($p.PriorityClass))"
+                  } catch {
+                      Write-RdpClipLog "Gagal set priority PID=$($p.Id): $($_.Exception.Message)"
+                  }
+              }
+              if (-not $active) {
+                  Write-RdpClipLog "PERINGATAN: rdpclip.exe belum terdeteksi pada Session $sessionId setelah restart."
+              }
+          } catch {
+              Write-RdpClipLog "ERROR: $($_.Exception.Message)"
+          }
           '@
           Set-Content -Path "C:\Reset-RdpClip.ps1" -Value $rdpClipFixScript -Encoding UTF8
 
-          # Daftarkan Scheduled Task yang berjalan di sesi interaktif user 'admin'
-          # Ini memungkinkan Watchdog (di Session 0) atau user merestart rdpclip.exe langsung di Desktop RDP aktif
-          $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"C:\Reset-RdpClip.ps1`""
+          # Script PowerShell ringan saat login untuk memastikan rdpclip.exe berjalan & prioritas AboveNormal tanpa restart paksa
+          $ensureRdpClipScript = @'
+          $ErrorActionPreference = 'Stop'
+          $logDir = "C:\ProgramData\RDPInit\logs"
+          if (!(Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+          $logFile = Join-Path $logDir "rdpclip.log"
+
+          function Write-EnsureLog {
+              param([string]$Message)
+              $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+              Add-Content -Path $logFile -Value "[$ts] [Ensure-RdpClip] $Message" -Encoding UTF8 -ErrorAction SilentlyContinue
+          }
+
+          try {
+              $sessionId = (Get-Process -Id $PID).SessionId
+              $procs = Get-Process -Name "rdpclip" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sessionId }
+              if (-not $procs) {
+                  Write-EnsureLog "rdpclip.exe tidak ditemukan saat startup pada Session $sessionId, menjalankan..."
+                  Start-Process -FilePath "C:\Windows\System32\rdpclip.exe" -WindowStyle Normal
+                  Start-Sleep -Milliseconds 400
+                  $procs = Get-Process -Name "rdpclip" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sessionId }
+              }
+              foreach ($p in $procs) {
+                  if ($p.PriorityClass -ne 'AboveNormal' -and $p.PriorityClass -ne 'High') {
+                      $p.PriorityClass = 'AboveNormal'
+                  }
+                  Write-EnsureLog "rdpclip.exe siap (Session=$sessionId, PID=$($p.Id), Priority=$($p.PriorityClass))"
+              }
+          } catch {
+              Write-EnsureLog "ERROR: $($_.Exception.Message)"
+          }
+          '@
+          Set-Content -Path "$rdpInitDir\Ensure-RdpClip.ps1" -Value $ensureRdpClipScript -Encoding UTF8
+
+          # Wrapper VBS resmi (Windows GUI Subsystem) agar powershell.exe berjalan benar-benar tanpa kedipan jendela console
+          $resetVbs = @'
+          Option Explicit
+          Dim shell, cmd
+          Set shell = CreateObject("WScript.Shell")
+          cmd = "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File ""C:\Reset-RdpClip.ps1"""
+          shell.Run cmd, 0, True
+          '@
+          Set-Content -Path "$rdpInitDir\Reset-RdpClip.vbs" -Value $resetVbs -Encoding ASCII
+
+          $triggerVbs = @'
+          Option Explicit
+          Dim shell
+          Set shell = CreateObject("WScript.Shell")
+          shell.Run "schtasks.exe /run /tn ""RDPClip_SelfHeal""", 0, False
+          '@
+          Set-Content -Path "$rdpInitDir\Trigger-RdpClipHeal.vbs" -Value $triggerVbs -Encoding ASCII
+
+          # Daftarkan Scheduled Task yang berjalan di sesi interaktif user 'admin' melalui wscript.exe (Zero Console Flash)
+          $taskAction = New-ScheduledTaskAction -Execute "C:\Windows\System32\wscript.exe" -Argument "//B //Nologo `"$rdpInitDir\Reset-RdpClip.vbs`""
           $taskPrincipal = New-ScheduledTaskPrincipal -UserId "admin" -LogonType Interactive -RunLevel Highest
-          $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+          $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -Hidden -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
           Register-ScheduledTask -TaskName "RDPClip_SelfHeal" -Action $taskAction -Principal $taskPrincipal -Settings $taskSettings -Force | Out-Null
 
-          # Buat juga shortcut di Public Desktop jika user ingin mereset clipboard secara manual kapan saja
+          # Shortcut di Public Desktop untuk mereset clipboard secara manual tanpa membuka jendela CMD/PowerShell
           $clipShortcut = $wshell.CreateShortcut("C:\Users\Public\Desktop\Fix Clipboard.lnk")
-          $clipShortcut.TargetPath = "schtasks.exe"
-          $clipShortcut.Arguments = "/run /tn `"RDPClip_SelfHeal`""
+          $clipShortcut.TargetPath = "C:\Windows\System32\wscript.exe"
+          $clipShortcut.Arguments = "//B //Nologo `"$rdpInitDir\Trigger-RdpClipHeal.vbs`""
+          $clipShortcut.IconLocation = "C:\Windows\System32\shell32.dll,238"
           $clipShortcut.Save()
 
           $startupDir = "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp"
           New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
+          Remove-Item -Path "$startupDir\launch_apps.bat" -Force -ErrorAction SilentlyContinue
 
-          $batContent = @"
+          # Batch konfigurasi HKCU, FileZilla XML, dan cleanup AutoDownloader (dijalankan tersembunyi oleh Launch-Apps.vbs)
+          $batContent = @'
           @echo off
+          set "LOGFILE=C:\ProgramData\RDPInit\logs\startup.log"
+          echo [%date% %time%] [launch_apps.bat] Memulai konfigurasi sesi user...>> "%LOGFILE%" 2>&1
+
           :: Optimasi Visual, Responsivitas Explorer, dan Input Latency
-          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f >nul 2>&1
-          reg add "HKCU\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d 0 /f >nul 2>&1
-          reg add "HKCU\Control Panel\Desktop" /v MenuShowDelay /t REG_SZ /d 0 /f >nul 2>&1
-          reg add "HKCU\Control Panel\Desktop" /v LowLevelHooksTimeout /t REG_SZ /d 1000 /f >nul 2>&1
-          reg add "HKCU\Control Panel\Desktop" /v WaitToKillAppTimeout /t REG_SZ /d 2000 /f >nul 2>&1
-          reg add "HKCU\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d 0 /f >nul 2>&1
-          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 0 /f >nul 2>&1
-          reg add "HKCU\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "" /f >nul 2>&1
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d 0 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Control Panel\Desktop" /v MenuShowDelay /t REG_SZ /d 0 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Control Panel\Desktop" /v LowLevelHooksTimeout /t REG_SZ /d 1000 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Control Panel\Desktop" /v WaitToKillAppTimeout /t REG_SZ /d 2000 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d 0 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 0 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Control Panel\Desktop" /v Wallpaper /t REG_SZ /d "" /f >> "%LOGFILE%" 2>&1
 
           :: Optimasi Windows Explorer & Matikan Clipboard History di level User
-          reg add "HKCU\Software\Microsoft\Clipboard" /v EnableClipboardHistory /t REG_DWORD /d 0 /f >nul 2>&1
-          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v LaunchTo /t REG_DWORD /d 1 /f >nul 2>&1
-          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v ListviewAlphaSelect /t REG_DWORD /d 0 /f >nul 2>&1
-          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v ListviewShadow /t REG_DWORD /d 0 /f >nul 2>&1
-          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v TaskbarAnimations /t REG_DWORD /d 0 /f >nul 2>&1
+          reg add "HKCU\Software\Microsoft\Clipboard" /v EnableClipboardHistory /t REG_DWORD /d 0 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v LaunchTo /t REG_DWORD /d 1 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v ListviewAlphaSelect /t REG_DWORD /d 0 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v ListviewShadow /t REG_DWORD /d 0 /f >> "%LOGFILE%" 2>&1
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v TaskbarAnimations /t REG_DWORD /d 0 /f >> "%LOGFILE%" 2>&1
 
-          :: Pastikan rdpclip.exe berjalan dengan prioritas AboveNormal saat sesi dimulai
-          powershell.exe -NoProfile -WindowStyle Hidden -Command "if (!(Get-Process rdpclip -ErrorAction SilentlyContinue)) { Start-Process rdpclip.exe }; Get-Process rdpclip -ErrorAction SilentlyContinue | ForEach-Object { \$_.PriorityClass = 'AboveNormal' }"
+          if not exist "%APPDATA%\FileZilla" mkdir "%APPDATA%\FileZilla" >> "%LOGFILE%" 2>&1
+          copy /y "C:\filezilla.xml" "%APPDATA%\FileZilla\filezilla.xml" >> "%LOGFILE%" 2>&1
+          copy /y "C:\layout.xml" "%APPDATA%\FileZilla\layout.xml" >> "%LOGFILE%" 2>&1
 
-          mkdir "%APPDATA%\FileZilla" >nul 2>&1
-          copy /y "C:\filezilla.xml" "%APPDATA%\FileZilla\filezilla.xml" >nul 2>&1
-          copy /y "C:\layout.xml" "%APPDATA%\FileZilla\layout.xml" >nul 2>&1
-
-          :: Pindahkan tampilan AutoDownloader langsung ke layar Desktop RDP begitu user login
+          :: Hentikan AutoDownloader sesi background sebelum dibuka ulang di layar Desktop RDP
           if exist "C:\Users\Public\Desktop\AutoDownloader.exe" (
-              taskkill /F /IM AutoDownloader.exe >nul 2>&1
-              start "" "C:\Users\Public\Desktop\AutoDownloader.exe"
+              taskkill /F /IM AutoDownloader.exe >> "%LOGFILE%" 2>&1
           )
 
-          start "" "C:\Users\Public\Desktop\Adobe Stock.lnk"
+          echo [%date% %time%] [launch_apps.bat] Konfigurasi sesi user selesai.>> "%LOGFILE%" 2>&1
+          exit /b 0
+          '@
+          Set-Content -Path "$rdpInitDir\launch_apps.bat" -Value $batContent -Encoding ASCII
 
-          if exist "C:\Program Files\FileZilla FTP Client\filezilla.exe" (
-              start "" "C:\Program Files\FileZilla FTP Client\filezilla.exe"
-          )
-          exit
-          "@
-          Set-Content -Path "$startupDir\launch_apps.bat" -Value $batContent
+          # Startup launcher berbasis wscript.exe (Zero CMD/PowerShell Flash, GUI apps tetap terbuka normal di desktop)
+          $startupVbs = @'
+          Option Explicit
+          Dim wsh, fso, shellApp, logFile
+
+          Set wsh = CreateObject("WScript.Shell")
+          Set fso = CreateObject("Scripting.FileSystemObject")
+          Set shellApp = CreateObject("Shell.Application")
+          logFile = "C:\ProgramData\RDPInit\logs\startup.log"
+
+          Sub WriteLog(msg)
+              On Error Resume Next
+              Dim f
+              Set f = fso.OpenTextFile(logFile, 8, True)
+              f.WriteLine "[" & Now & "] [Launch-Apps.vbs] " & msg
+              f.Close
+              On Error GoTo 0
+          End Sub
+
+          WriteLog "Startup session RDP dimulai."
+
+          If fso.FileExists("C:\ProgramData\RDPInit\launch_apps.bat") Then
+              Dim rc
+              rc = wsh.Run("cmd.exe /c ""C:\ProgramData\RDPInit\launch_apps.bat""", 0, True)
+              WriteLog "launch_apps.bat selesai dengan exit code: " & rc
+          Else
+              WriteLog "PERINGATAN: C:\ProgramData\RDPInit\launch_apps.bat tidak ditemukan."
+          End If
+
+          If fso.FileExists("C:\Users\Public\Desktop\AutoDownloader.exe") Then
+              shellApp.ShellExecute "C:\Users\Public\Desktop\AutoDownloader.exe", "", "", "open", 1
+              WriteLog "AutoDownloader.exe diluncurkan ke desktop."
+          End If
+
+          If fso.FileExists("C:\Users\Public\Desktop\Adobe Stock.lnk") Then
+              shellApp.ShellExecute "C:\Users\Public\Desktop\Adobe Stock.lnk", "", "", "open", 1
+              WriteLog "Adobe Stock.lnk diluncurkan ke desktop."
+          End If
+
+          If fso.FileExists("C:\Program Files\FileZilla FTP Client\filezilla.exe") Then
+              shellApp.ShellExecute "C:\Program Files\FileZilla FTP Client\filezilla.exe", "", "", "open", 1
+              WriteLog "filezilla.exe diluncurkan ke desktop."
+          End If
+
+          wsh.Run "powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File ""C:\ProgramData\RDPInit\Ensure-RdpClip.ps1""", 0, False
+          WriteLog "Ensure-RdpClip.ps1 dijalankan di background."
+          '@
+          Set-Content -Path "$startupDir\Launch-Apps.vbs" -Value $startupVbs -Encoding ASCII
 
       - name: Monitor Bore Stream & Self-Healing Watchdog
         env:
@@ -440,6 +591,21 @@ jobs:
           $lastFullAddress = ""
           $global:boreProc = $null
           $lastClipRestart = [DateTime]::MinValue
+          $watchdogLogFile = "C:\ProgramData\RDPInit\logs\watchdog.log"
+
+          function Write-WatchdogLog {
+              param([string]$Message)
+              Write-Host $Message
+              try {
+                  $logDir = Split-Path -Path $watchdogLogFile -Parent
+                  if (!(Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+                  if ((Test-Path $watchdogLogFile) -and ((Get-Item $watchdogLogFile -ErrorAction SilentlyContinue).Length -gt 1MB)) {
+                      Move-Item -Path $watchdogLogFile -Destination "$watchdogLogFile.old" -Force -ErrorAction SilentlyContinue
+                  }
+                  $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+                  Add-Content -Path $watchdogLogFile -Value "[$ts] $Message" -Encoding UTF8 -ErrorAction SilentlyContinue
+              } catch {}
+          }
 
           $cleanup = {
               if ($global:boreProc -and !$global:boreProc.HasExited) {
@@ -454,26 +620,45 @@ jobs:
               # 1. Pastikan service TermService tetap berjalan dan berprioritas tinggi
               $termSvc = Get-Service -Name "TermService" -ErrorAction SilentlyContinue
               if ($termSvc -and $termSvc.Status -ne 'Running') {
-                  Write-Host "[WATCHDOG] Peringatan: TermService berhenti! Menjalankan ulang..."
+                  Write-WatchdogLog "[WATCHDOG] Peringatan: TermService berhenti! Menjalankan ulang..."
                   Start-Service -Name "TermService" -ErrorAction SilentlyContinue
               }
 
               # 2. Periksa apakah ada sesi RDP aktif (Explorer berjalan di Session ID > 0)
               $activeExplorers = Get-Process -Name "explorer" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -gt 0 }
               if ($activeExplorers) {
+                  # Pastikan AutoDownloader sesi background (Session 0) dihentikan saat sesi desktop RDP aktif
+                  $bgDownloader = Get-Process -Name "AutoDownloader" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq 0 }
+                  if ($bgDownloader) {
+                      Write-WatchdogLog "[WATCHDOG] Menghentikan AutoDownloader Session 0 karena sesi RDP aktif..."
+                      $bgDownloader | Stop-Process -Force -ErrorAction SilentlyContinue
+                  }
+
                   foreach ($exp in $activeExplorers) {
                       $sid = $exp.SessionId
+                      $explorerAgeSec = 999
+                      try {
+                          if ($exp.StartTime) {
+                              $explorerAgeSec = ([DateTime]::Now - $exp.StartTime).TotalSeconds
+                          }
+                      } catch {}
+
                       $clipProc = Get-Process -Name "rdpclip" -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid }
 
                       $needsRestart = $false
                       $reason = ""
 
                       if (!$clipProc) {
-                          $needsRestart = $true
-                          $reason = "rdpclip.exe tidak ditemukan di Session $sid"
+                          # Beri grace period 8 detik setelah login agar inisialisasi logon alami tidak bentrok dengan Watchdog
+                          if ($explorerAgeSec -ge 8) {
+                              $needsRestart = $true
+                              $reason = "rdpclip.exe tidak ditemukan di Session $sid"
+                          }
                       } elseif ($clipProc | Where-Object { !$_.Responding }) {
-                          $needsRestart = $true
-                          $reason = "rdpclip.exe mengalami Not Responding (Hang) di Session $sid"
+                          if ($explorerAgeSec -ge 8) {
+                              $needsRestart = $true
+                              $reason = "rdpclip.exe mengalami Not Responding (Hang) di Session $sid"
+                          }
                       } elseif ($clipProc | Where-Object { $_.WorkingSet64 -gt 150MB -or $_.HandleCount -gt 2500 }) {
                           $needsRestart = $true
                           $reason = "rdpclip.exe terdeteksi memory/handle leak di Session $sid"
@@ -486,18 +671,21 @@ jobs:
                           }
                       }
 
-                      # Cooldown minimal 15 detik agar tidak terjadi restart loop tanpa kontrol
+                      # Cooldown minimal 15 detik & pastikan task tidak sedang berjalan agar tidak terjadi restart loop/konflik
                       if ($needsRestart -and (([DateTime]::UtcNow - $script:lastClipRestart).TotalSeconds -ge 15)) {
-                          Write-Host "[WATCHDOG] Memulihkan Clipboard RDP ($reason)..."
-                          Start-ScheduledTask -TaskName "RDPClip_SelfHeal" -ErrorAction SilentlyContinue
-                          $script:lastClipRestart = [DateTime]::UtcNow
+                          $taskInfo = Get-ScheduledTask -TaskName "RDPClip_SelfHeal" -ErrorAction SilentlyContinue
+                          if ($taskInfo -and $taskInfo.State -ne 'Running') {
+                              Write-WatchdogLog "[WATCHDOG] Memulihkan Clipboard RDP ($reason)..."
+                              Start-ScheduledTask -TaskName "RDPClip_SelfHeal" -ErrorAction SilentlyContinue
+                              $script:lastClipRestart = [DateTime]::UtcNow
+                          }
                       }
                   }
               } else {
                   # 3. Jika belum ada sesi RDP aktif, pastikan AutoDownloader tetap hidup di background
                   $dlProc = Get-Process -Name "AutoDownloader" -ErrorAction SilentlyContinue
                   if (!$dlProc -and (Test-Path "C:\Users\Public\Desktop\AutoDownloader.exe")) {
-                      Write-Host "[WATCHDOG] Menjalankan kembali AutoDownloader di background..."
+                      Write-WatchdogLog "[WATCHDOG] Menjalankan kembali AutoDownloader di background..."
                       Start-Process -FilePath "C:\Users\Public\Desktop\AutoDownloader.exe" -WindowStyle Hidden
                   }
               }
@@ -594,7 +782,7 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           Write-Host "Membersihkan instance dan mematikan tunnel..."
           Get-Process -Name "bore" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-          
+
           if ($env:SCRIPT_URL -and $env:SCRIPT_SECRET) {
               try {
                   $url = "$($env:SCRIPT_URL)?action=offline&secret=$($env:SCRIPT_SECRET)"
